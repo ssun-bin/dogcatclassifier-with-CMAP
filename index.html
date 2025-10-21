@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>fastai2 /predict API Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; line-height: 1.45; }
+    h1 { margin: 0 0 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .row > * { flex: 1 1 auto; }
+    .btn { cursor: pointer; padding: 10px 14px; border-radius: 12px; border: 1px solid #e5e7eb; background: #fff; }
+    .btn:hover { background: #f9fafb; }
+    .out-img { max-width: 100%; border-radius: 12px; border: 1px solid #e5e7eb; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; }
+    th { background: #f9fafb; }
+    .muted { color: #6b7280; font-size: 0.9rem; }
+    .spinner { display: none; }
+    .spinner.on { display: inline-block; }
+    .footer { color: #9ca3af; font-size: 12px; margin-top: 8px; }
+    .token { width: 100%; max-width: 420px; }
+  </style>
+</head>
+<body>
+  <h1>🐶🐱 fastai2 Grad-CAM & 확률 데모</h1>
+  <p class="muted">이미지를 업로드하고 <b>/predict</b> API를 호출해 결과를 확인하세요.</p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>이미지 업로드</label><br />
+        <input id="file" type="file" accept="image/*" />
+      </div>
+      <div>
+        <label>Hugging Face Token (비공개 Space일 때만)</label><br />
+        <input id="token" class="token" type="password" placeholder="hf_xxx (옵션)" />
+      </div>
+      <div style="align-self:flex-end;">
+        <button id="run" class="btn">/predict 호출</button>
+        <span id="spin" class="spinner">⏳ 호출 중…</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>① Grad-CAM Heatmap</h3>
+    <img id="heatmap" class="out-img" alt="Grad-CAM Heatmap will appear here" />
+  </div>
+
+  <div class="card">
+    <h3>② 클래스별 확률</h3>
+    <table id="probs">
+      <thead><tr><th>클래스</th><th>확률</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="footer">모델 출력 형식에 따라 JSON → 표 변환 로직이 약간 달라질 수 있습니다.</div>
+  </div>
+
+  <!-- ESM: @gradio/client from jsDelivr -->
+  <script type="module">
+    import { Client } from "https://cdn.jsdelivr.net/npm/@gradio/client/+esm";
+
+    const $ = (sel) => document.querySelector(sel);
+    const btn = $("#run");
+    const spin = $("#spin");
+    const imgEl = $("#heatmap");
+    const tbody = $("#probs tbody");
+
+    function setLoading(on) {
+      if (on) {
+        btn.disabled = true;
+        spin.classList.add("on");
+      } else {
+        btn.disabled = false;
+        spin.classList.remove("on");
+      }
+    }
+
+    function clearOutputs() {
+      imgEl.src = "";
+      tbody.innerHTML = "";
+    }
+
+    function blobOrDataUrlFrom(any) {
+      // Gradio client 브라우저 반환 형식: Blob 또는 { url | path | data } 등일 수 있음.
+      if (!any) return null;
+      // Blob 직접 반환되는 경우:
+      if (any instanceof Blob) return URL.createObjectURL(any);
+      // 객체인 경우: { url } 또는 { path } 또는 { data: "data:image/png;base64,..." }
+      if (typeof any === "object") {
+        if (any.url) return any.url;
+        if (any.path) return any.path;
+        if (any.data && typeof any.data === "string") return any.data; // data URL
+      }
+      // 문자열인 경우: data URL 또는 절대 URL로 가정
+      if (typeof any === "string") return any;
+      return null;
+    }
+
+    function renderProbabilities(val) {
+      // Label 컴포넌트 반환은 보통 { label: "Cat", confidences: [{label, confidence}, ...] } 또는
+      // 단순 dict 형태 { Cat: 0.98, Dog: 0.02 } 등 다양할 수 있음 → 둘 다 처리
+      tbody.innerHTML = "";
+
+      if (!val) return;
+
+      let entries = [];
+      if (val.confidences && Array.isArray(val.confidences)) {
+        entries = val.confidences.map(({ label, confidence }) => [label, confidence]);
+      } else if (typeof val === "object") {
+        entries = Object.entries(val);
+      } else {
+        // 알 수 없는 포맷 → 문자열로 표시
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="2"><code>${String(val)}</code></td>`;
+        tbody.appendChild(tr);
+        return;
+      }
+
+      // 확률 내림차순 정렬
+      entries.sort((a, b) => Number(b[1]) - Number(a[1]));
+      for (const [label, prob] of entries) {
+        const tr = document.createElement("tr");
+        const pct = (Number(prob) * 100).toFixed(2) + "%";
+        tr.innerHTML = `<td>${label}</td><td>${pct}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    btn.addEventListener("click", async () => {
+      clearOutputs();
+      const file = $("#file").files?.[0];
+      const token = $("#token").value.trim();
+
+      if (!file) {
+        alert("이미지 파일을 선택하세요.");
+        return;
+      }
+
+      setLoading(true);
+      try {
+        // Space 연결 (비공개이면 hf_token 전달)
+        const client = await Client.connect("ssunbin/fastai2", token ? { hf_token: token } : undefined);
+
+        // /predict 호출: 컴포넌트 명세에 따라 key는 "img"
+        const result = await client.predict("/predict", { img: file });
+
+        // result.data는 [ heatmap, label_probs ] 형식
+        const [heatmap, probs] = result?.data ?? [];
+
+        // ① 이미지 렌더
+        const heatmapUrl = blobOrDataUrlFrom(heatmap);
+        if (heatmapUrl) imgEl.src = heatmapUrl;
+
+        // ② 확률 표 렌더
+        renderProbabilities(probs);
+
+      } catch (err) {
+        console.error(err);
+        alert("예상치 못한 오류가 발생했습니다. 콘솔을 확인하세요.");
+      } finally {
+        setLoading(false);
+      }
+    });
+  </script>
+
+  <p class="footer">
+    로컬 파일로 열면 모듈/파일 접근 정책 때문에 막힐 수 있습니다. <code>python -m http.server 8000</code> 등으로
+    간단 서버를 띄워 <a href="http://localhost:8000" target="_blank">http://localhost:8000</a> 로 접속하세요.
+  </p>
+</body>
+</html>
