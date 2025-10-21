@@ -1,2 +1,2 @@
-# dogcatclassifier-with-CMAP
-dogcatclassifier-with-CMAP website
+# dogcatclassifier-with-GradCAM
+dogcatclassifier-with-GradCAM website
